@@ -1,0 +1,24 @@
+# JetBrains IDE project files
+.idea/
+*.iml
+
+# VS Code project files
+.vscode/
+
+# macOS system files
+.DS_Store
+
+# Windows system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Node.js dependencies (if it's a JS/TS project)
+node_modules/
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.*
