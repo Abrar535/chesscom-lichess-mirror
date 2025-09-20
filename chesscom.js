@@ -3,6 +3,9 @@ console.log("[ChessMirror] chesscom.js loaded");
 let prevFen = null; // kept for logs; will be derived from state below
 let prevBoard = null; // piece placement only (first FEN field)
 let currentTurn = 'w';
+let lastSentBoard = null; // track last board position sent (piece placement only)
+let lastTurnCheck = 0; // timestamp of last turn check to prevent rapid changes
+let fullMoveNumber = 1; // Track the full move number properly
 const chess = new Chess(); // from chess.js
 
 // Map chess.com piece classes to FEN letters
@@ -12,43 +15,26 @@ const pieceMap = {
 };
 
 // Try to detect whose turn it is on chess.com (returns 'w' or 'b')
+// NOTE: This is only used for initial setup, not during gameplay
 function getTurn() {
-    try {
-        // Common indicators across chess.com pages
-        // 1) A container with attribute indicating player to move
-        const attrEl = document.querySelector('[data-player-to-move]');
-        const attrVal = attrEl?.getAttribute?.('data-player-to-move');
-        if (attrVal === 'white') return 'w';
-        if (attrVal === 'black') return 'b';
-
-        // 2) Text-based indicators near the board or clocks
-        const candidates = [
-            document.querySelector('.move-turn, .clock-player-turn, .move__player, .board-player-turn'),
-            document.querySelector('wc-chess-board'),
-            document.querySelector('#board, .board, .game-board')
-        ].filter(Boolean);
-
-        let haystack = '';
-        for (const el of candidates) {
-            const aria = el.getAttribute?.('aria-label') || '';
-            haystack += ' ' + aria + ' ' + (el.textContent || '');
-        }
-        haystack = haystack.toLowerCase();
-        if (/(black to move|black-to-move|\bblack\b.*to move)/.test(haystack)) return 'b';
-        if (/(white to move|white-to-move|\bwhite\b.*to move)/.test(haystack)) return 'w';
-    } catch (_) {}
-
-    // Fallback: infer from move count parity using our prevFen if available
+    console.log("[ChessMirror] getTurn() called - prevFen:", prevFen);
+    
+    // For initial setup, check if we can determine from any existing FEN
     try {
         if (prevFen) {
-            const prev = prevFen.split(' ');
-            if (prev.length >= 2) {
-                // Toggle the turn from previous FEN
-                return prev[1] === 'w' ? 'b' : 'w';
+            const parts = prevFen.split(' ');
+            if (parts.length >= 2) {
+                const turn = parts[1]; // Get turn directly from FEN
+                console.log("[ChessMirror] getTurn() found turn from FEN:", turn);
+                if (turn === 'w' || turn === 'b') {
+                    return turn;
+                }
             }
         }
     } catch (_) {}
-    // Default to white
+
+    console.log("[ChessMirror] getTurn() defaulting to white");
+    // Default to white for initial position
     return 'w';
 }
 
@@ -109,50 +95,104 @@ function getBoardPlacement() {
         fenRanks.push(str);
     }
 
-    const turn = getTurn();
+    // Return ONLY the board placement, no turn info
     return fenRanks.join("/");
 }
 
 // Compose full FEN from board placement and current turn
 function makeFen(boardPlacement, turn) {
-    return boardPlacement + " " + turn + " KQkq - 0 1";
+    return boardPlacement + " " + turn + " KQkq - 0 " + fullMoveNumber;
 }
 
 // Identity conversion: once mapping is corrected, no post-processing needed
 function convertToStandardFEN(chesscomFen) { return chesscomFen; }
 
-// Detect moves
-function detectMove() {
-    const board = convertToStandardFEN(getBoardPlacement()).split(' ')[0];
+// Detect moves and handle turn changes
+function detectMoveAndUpdateTurn(board, source = "mutation") {
     if (prevBoard === null) prevBoard = board;
+    
+    console.log(`[ChessMirror] detectMoveAndUpdateTurn() called from ${source} - currentTurn:`, currentTurn);
     const fen = makeFen(board, currentTurn);
-    console.log("[ChessMirror] FEN:", fen);
+    console.log("v7 [ChessMirror] FEN:", fen);
 
     if (board !== prevBoard) {
+        console.log("[ChessMirror] Board changed - attempting move detection");
+        console.log("[ChessMirror] Previous board:", prevBoard);
+        console.log("[ChessMirror] Current board:", board);
+        
         try {
             // Load previous position with side-to-move = currentTurn
-            chess.load(makeFen(prevBoard, currentTurn));
+            const prevFenForChess = makeFen(prevBoard, currentTurn);
+            console.log("[ChessMirror] Loading previous position for chess.js:", prevFenForChess);
+            
+            chess.load(prevFenForChess);
             const moves = chess.moves({ verbose: true });
+            console.log("[ChessMirror] Available moves from chess.js:", moves.length);
+            
+            let moveFound = false;
             for (const move of moves) {
-                const tmp = new Chess(makeFen(prevBoard, currentTurn));
+                const tmp = new Chess(prevFenForChess);
                 tmp.move(move);
-                if (tmp.fen().split(" ")[0] === board) {
-                    console.log("[ChessMirror] Detected move:", move.from + move.to + (move.promotion || ""));
+                const resultBoard = tmp.fen().split(" ")[0];
+                
+                if (resultBoard === board) {
+                    console.log("[ChessMirror] ✅ FOUND MATCHING MOVE:", move.from + move.to + (move.promotion || ""));
                     chrome.runtime.sendMessage({ type: "MOVE", uci: move.from + move.to + (move.promotion || "") });
+                    
+                    console.log("[ChessMirror] BEFORE toggle - currentTurn:", currentTurn, "fullMoveNumber:", fullMoveNumber);
+                    
                     // Toggle side to move after a confirmed move
                     currentTurn = currentTurn === 'w' ? 'b' : 'w';
+                    
+                    // Increment full move number when black completes their move (white's turn again)
+                    if (currentTurn === 'w') {
+                        fullMoveNumber++;
+                    }
+                    
+                    console.log("[ChessMirror] AFTER toggle - currentTurn:", currentTurn, "fullMoveNumber:", fullMoveNumber);
+                    
                     // Update prev state to the new board
                     prevBoard = board;
+                    moveFound = true;
                     break;
                 }
             }
+            
+            if (!moveFound) {
+                console.log("[ChessMirror] ❌ NO MATCHING MOVE FOUND!");
+                console.log("[ChessMirror] This means chess.js couldn't find a legal move from previous position to current position");
+                console.log("[ChessMirror] Possible causes: invalid FEN, multiple moves happened, or position is incorrect");
+                // Update prevBoard anyway to avoid getting stuck
+                prevBoard = board;
+            }
+            
         } catch (e) {
-            console.error("[ChessMirror] Move detection failed", e);
+            console.error("[ChessMirror] Move detection failed - chess.js error:", e);
+            console.log("[ChessMirror] This usually means the FEN is invalid or the position is illegal");
+            // Update prevBoard anyway to avoid getting stuck
+            prevBoard = board;
         }
-        // Send FEN reflecting the next side to move
-        chrome.runtime.sendMessage({ type: "FEN", fen: makeFen(prevBoard, currentTurn) });
-        prevFen = makeFen(prevBoard, currentTurn);
+        
+        // Send FEN reflecting the current state
+        const newFen = makeFen(board, currentTurn);
+        const boardChanged = !lastSentBoard || JSON.stringify(board) !== JSON.stringify(lastSentBoard);
+        
+        console.log("[ChessMirror] Final FEN after move detection:", newFen);
+        console.log("[ChessMirror] Board changed:", boardChanged);
+        
+        if (boardChanged) {
+            chrome.runtime.sendMessage({ type: "FEN", fen: newFen });
+            lastSentBoard = JSON.parse(JSON.stringify(board)); // deep copy
+            console.log("[ChessMirror] Sent FEN to Lichess:", newFen);
+        }
+        prevFen = newFen;
     }
+}
+
+// Main detectMove function for mutation observer
+function detectMove() {
+    const board = getBoardPlacement();
+    detectMoveAndUpdateTurn(board, "mutation");
 }
 
 // Wait for board to appear
@@ -167,15 +207,38 @@ function waitForBoard(callback) {
 }
 
 waitForBoard((board) => {
+    console.log("[ChessMirror] Initializing - currentTurn before getTurn():", currentTurn);
+    
     // Initialize state once board is present
-    currentTurn = getTurn();
+    currentTurn = getTurn(); // Only used for initial setup
+    console.log("[ChessMirror] Initializing - currentTurn after getTurn():", currentTurn);
+    
     prevBoard = getBoardPlacement();
     prevFen = makeFen(prevBoard, currentTurn);
+    lastSentBoard = JSON.parse(JSON.stringify(prevBoard)); // Initialize last sent board position
+    
+    console.log("[ChessMirror] Initial state - currentTurn:", currentTurn, "fullMoveNumber:", fullMoveNumber);
+    
+    // Send initial FEN to Lichess
+    chrome.runtime.sendMessage({ type: "FEN", fen: prevFen });
+    console.log("[ChessMirror] Initial FEN sent to Lichess:", prevFen);
+    
     // Debounce rapid mutations during drag animations
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
         clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(detectMove, 120);
+        debounceTimer = setTimeout(detectMove, 50); // Reduced from 120ms to 50ms for faster response
     });
     observer.observe(board, { childList: true, subtree: true, attributes: true });
+    
+    // Periodic check for fast play scenarios - now uses proper move detection
+    setInterval(() => {
+        const currentBoard = getBoardPlacement();
+        
+        // Only run detection if board actually changed
+        if (JSON.stringify(currentBoard) !== JSON.stringify(prevBoard)) {
+            console.log("v7[ChessMirror] Periodic check detected board change - running move detection");
+            detectMoveAndUpdateTurn(currentBoard, "periodic");
+        }
+    }, 200); // Check every 200ms
 });

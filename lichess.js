@@ -1,6 +1,7 @@
 console.log("[ChessMirror] Lichess content script loaded");
 
 let boardReady = false;
+let preferredOrientation = null; // 'white' | 'black'; initialized from current board
 
 function simulateMoveOnBoard(uci) {
     const board = document.querySelector("cg-board");
@@ -28,6 +29,7 @@ function simulateMoveOnBoard(uci) {
     board.dispatchEvent(mousedown);
     board.dispatchEvent(mousemove);
     board.dispatchEvent(mouseup);
+    ensureOrientation();
 }
 
 // Listen for messages from background/chess.com
@@ -64,23 +66,59 @@ function setFenOnLichess(fen) {
         return;
     }
 
+    // Clear any existing value first
+    fenInput.value = '';
     fenInput.focus();
-    fenInput.value = fen;
-    fenInput.dispatchEvent(new Event('input', { bubbles: true }));
-    fenInput.dispatchEvent(new Event('change', { bubbles: true }));
-    // Press Enter to apply
-    fenInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-    fenInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    
+    // Small delay to ensure input is ready
+    setTimeout(() => {
+        fenInput.value = fen;
+        fenInput.dispatchEvent(new Event('input', { bubbles: true }));
+        fenInput.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        // Press Enter to apply
+        setTimeout(() => {
+            fenInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+            fenInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+            
+            console.log("[ChessMirror] FEN set on Lichess:", fen);
+            ensureOrientation();
+        }, 50);
+    }, 10);
+}
 
-    console.log("[ChessMirror] FEN set on Lichess:", fen);
+// Force a fixed orientation by clicking the flip button if needed
+function ensureOrientation(desired) {
+    const wrap = document.querySelector('.cg-wrap, .cg-container');
+    if (!wrap) return;
+    const isBlack = wrap.classList.contains('orientation-black');
+    const current = isBlack ? 'black' : 'white';
+    // Initialize preferredOrientation from current if not set
+    if (!preferredOrientation) preferredOrientation = desired || current;
+    const target = desired || preferredOrientation;
+    if (current === target) return;
+    const flipBtn = document.querySelector('button[title*="Flip" i], button[aria-label*="Flip" i], .flip.board button, .analyse__tools button.flip');
+    if (flipBtn) flipBtn.click();
 }
 
 // Wait until board is loaded
 function waitForBoard() {
     const board = document.querySelector("cg-board");
     if (board) {
-        console.log("[ChessMirror] Lichess board ready");
+        console.log("v1.0 [ChessMirror] Lichess board ready");
         boardReady = true;
+        // Initialize orientation preference to whatever the user currently sees
+        preferredOrientation = null; // will be set by ensureOrientation()
+        ensureOrientation();
+        // If user manually flips later, treat that as new preference
+        const wrap = document.querySelector('.cg-wrap, .cg-container');
+        if (wrap) {
+            const obs = new MutationObserver(() => {
+                const isBlack = wrap.classList.contains('orientation-black');
+                preferredOrientation = isBlack ? 'black' : 'white';
+            });
+            obs.observe(wrap, { attributes: true, attributeFilter: ['class'] });
+        }
     } else {
         setTimeout(waitForBoard, 500);
     }
